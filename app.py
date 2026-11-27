@@ -1,71 +1,92 @@
-from flask import Flask, render_template, request
-from bs4 import BeautifulSoup
-import requests
-from dotenv import load_dotenv
-load_dotenv()
 import os
-unsplash_api_key = os.getenv('unsplash_api_key')
 
+import requests
+from bs4 import BeautifulSoup
+from dotenv import load_dotenv
+from flask import Flask, render_template, request, url_for
 
-
+load_dotenv()
 
 app = Flask(__name__)
 
+BASE_URL = "https://www.ndtv.com"
+SECTIONS = ["LATEST", "INDIA", "CITIES", "WORLD-NEWS", "EDUCATION", "SCIENCE", "PEOPLE"]
+REQUEST_TIMEOUT = (5, 15)
 
-@app.route('/', methods=['GET', 'POST'])
-def index():
-    url = 'https://www.ndtv.com/'
-    response = requests.get(url)
-    header_tags=["LATEST","INDIA","CITIES","WORLD-NEWS","EDUCATION","SCIENCE","PEOPLE"]
-    num=0
-    if request.method == 'POST': 
-     num = int(request.form["section_number"])
-    
-    selected_section = header_tags[num]
-    #url
-    section_url = url+header_tags[num]
-        
-    # Send a GET request to the section URL
-    response = requests.get(section_url)
 
-    # Create a BeautifulSoup object to parse the HTML content of the section
-    section_soup = BeautifulSoup(response.content, 'html.parser')
-    
-    
-    # Find the div tag that represents the different news articles
-    articles = section_soup.find_all('div', class_='news_Itm', limit=8)
-    finalNews = ""
+def fetch_headlines(section):
+    """Fetch up to eight article blurbs from the selected NDTV section."""
+    if section not in SECTIONS:
+        raise ValueError("Unsupported news section")
+
+    response = requests.get(
+        f"{BASE_URL}/{section}",
+        headers={"User-Agent": "TechNewsPortfolioDemo/1.0"},
+        timeout=REQUEST_TIMEOUT,
+    )
+    response.raise_for_status()
+
+    soup = BeautifulSoup(response.content, "html.parser")
+    articles = soup.find_all("div", class_="news_Itm", limit=8)
+    blurbs = []
     for article in articles:
-        news_itm_cont_div = article.find('div', class_='news_Itm-cont')
-        if news_itm_cont_div is not None:
-            dec = news_itm_cont_div.find('p')
-            if dec is not None:
-                finalNews += dec.text + "\n"
-    # Fetch the image URL from the Unsplash API
-    unsplash_url = f'https://api.unsplash.com/photos/random?client_id={unsplash_api_key}'
-    unsplash_response = requests.get(unsplash_url)
-    if unsplash_response.status_code == 200:
-        random_image = unsplash_response.json()
-        image_url = random_image['urls']['regular']
-    else:
-        image_url = 'https://img.freepik.com/free-vector/instagram-background-gradient-colors_23-2147821882.jpg?w=740&t=st=1688179543~exp=1688180143~hmac=e070dcbbe1a862354d21b00c5bb742929ba55f887008e255aeefa9db8328b5bd'
-    
-    return render_template('index.html', News=finalNews, header=selected_section, image_url=image_url)
+        description = article.select_one(".news_Itm-cont p")
+        if description:
+            blurb = description.get_text(" ", strip=True)
+            if blurb:
+                blurbs.append(blurb)
+
+    return "\n".join(blurbs) if blurbs else "No headlines were found for this section."
 
 
+def get_random_image():
+    """Use Unsplash when configured; otherwise serve the bundled fallback image."""
+    fallback = url_for("static", filename="images/download.jpg")
+    api_key = os.getenv("UNSPLASH_ACCESS_KEY") or os.getenv("unsplash_api_key")
+    if not api_key:
+        return fallback
 
-    if __name__ == '__main__':
-     app.run()
-
-      
-
-
-
-
-
-
-
-
-
+    try:
+        response = requests.get(
+            "https://api.unsplash.com/photos/random",
+            params={"client_id": api_key},
+            timeout=REQUEST_TIMEOUT,
+        )
+        response.raise_for_status()
+        image_url = response.json().get("urls", {}).get("regular")
+        return image_url or fallback
+    except (requests.RequestException, ValueError, TypeError):
+        return fallback
 
 
+@app.route("/", methods=["GET", "POST"])
+def index():
+    raw_section = request.form.get("section_number", "0") if request.method == "POST" else "0"
+    try:
+        section_index = int(raw_section)
+    except (TypeError, ValueError):
+        section_index = 0
+
+    if not 0 <= section_index < len(SECTIONS):
+        section_index = 0
+
+    selected_section = SECTIONS[section_index]
+    try:
+        news = fetch_headlines(selected_section)
+    except requests.RequestException:
+        news = "Headlines are temporarily unavailable. Please try again later."
+
+    return render_template(
+        "index.html",
+        News=news,
+        header=selected_section,
+        image_url=get_random_image(),
+    )
+
+
+if __name__ == "__main__":
+    app.run(
+        host="127.0.0.1",
+        port=int(os.getenv("PORT", "5000")),
+        debug=os.getenv("FLASK_DEBUG") == "1",
+    )
